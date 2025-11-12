@@ -270,11 +270,30 @@ function parse() {
 	if (!appState) {
 		return null;
 	}
-	const keys = Object.keys(appState);
-	const key = keys[0];
-	if (appState[key] && appState[key][6]) {
-		return appState[key][6];
+
+	// FIX: Robust key search - Google uses various dynamic key patterns
+	// Try all possible patterns and iterate through all keys as fallback
+
+	// Strategy 1: Try common patterns (Af-Zf, af-zf)
+	for (let i = 65; i <= 90; i++) {
+		const upperKey = String.fromCharCode(i) + "f";
+		if (appState[upperKey] && appState[upperKey][6]) {
+			return appState[upperKey][6];
+		}
+		const lowerKey = String.fromCharCode(i + 32) + "f";
+		if (appState[lowerKey] && appState[lowerKey][6]) {
+			return appState[lowerKey][6];
+		}
 	}
+
+	// Strategy 2: Iterate through all actual keys (most robust fallback)
+	const keys = Object.keys(appState);
+	for (const key of keys) {
+		if (appState[key] && appState[key][6]) {
+			return appState[key][6];
+		}
+	}
+
 	return null;
 }
 `
