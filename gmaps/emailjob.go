@@ -2,6 +2,7 @@ package gmaps
 
 import (
 	"context"
+	"net/url"
 	"strings"
 
 	"github.com/PuerkitoBio/goquery"
@@ -26,12 +27,17 @@ func NewEmailJob(parentID string, entry *Entry, opts ...EmailExtractJobOptions) 
 		defaultMaxRetries = 0
 	)
 
+	// FIX: Normalize Google redirect URLs before creating email job
+	// Google sometimes returns relative URLs like "/url?q=http://example.com/..."
+	// We need to extract the actual URL from the 'q' parameter
+	normalizedURL := normalizeGoogleURL(entry.WebSite)
+
 	job := EmailExtractJob{
 		Job: scrapemate.Job{
 			ID:         uuid.New().String(),
 			ParentID:   parentID,
 			Method:     "GET",
-			URL:        entry.WebSite,
+			URL:        normalizedURL,
 			MaxRetries: defaultMaxRetries,
 			Priority:   defaultPrio,
 		},
@@ -136,4 +142,37 @@ func getValidEmail(s string) (string, error) {
 	}
 
 	return email.String(), nil
+}
+
+// normalizeGoogleURL converts Google redirect URLs to actual target URLs
+// Google Maps returns URLs like "/url?q=http://example.com/&opi=..." for external links
+// This function extracts the actual URL from the 'q' query parameter
+func normalizeGoogleURL(rawURL string) string {
+	if rawURL == "" {
+		return rawURL
+	}
+
+	// If URL starts with "/url?q=" it's a Google redirect
+	if strings.HasPrefix(rawURL, "/url?q=") {
+		// Parse as URL with Google base
+		fullURL := "https://www.google.com" + rawURL
+		parsed, err := url.Parse(fullURL)
+		if err != nil {
+			return rawURL // Return original on parse error
+		}
+
+		// Extract the 'q' parameter (actual target URL)
+		targetURL := parsed.Query().Get("q")
+		if targetURL != "" {
+			return targetURL
+		}
+	}
+
+	// If URL starts with "/" it's relative - prepend Google base
+	if strings.HasPrefix(rawURL, "/") {
+		return "https://www.google.com" + rawURL
+	}
+
+	// Already a full URL - return as-is
+	return rawURL
 }
