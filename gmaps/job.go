@@ -5,17 +5,16 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
 	"github.com/google/uuid"
-	"github.com/gosom/google-maps-scraper/deduper"
-	"github.com/gosom/google-maps-scraper/exiter"
 	"github.com/gosom/scrapemate"
 	"github.com/playwright-community/playwright-go"
+
+	"github.com/gosom/google-maps-scraper/deduper"
+	"github.com/gosom/google-maps-scraper/exiter"
 )
 
 type GmapJobOptions func(*GmapJob)
@@ -55,7 +54,7 @@ func NewGmapJob(
 	if geoCoordinates != "" && zoom > 0 {
 		mapURL = fmt.Sprintf("https://www.google.com/maps/search/%s/@%s,%dz", query, strings.ReplaceAll(geoCoordinates, " ", ""), zoom)
 	} else {
-		//Warning: geo and zoom MUST be both set or not
+		// Warning: geo and zoom MUST be both set or not
 		mapURL = fmt.Sprintf("https://www.google.com/maps/search/%s", query)
 	}
 
@@ -156,66 +155,28 @@ func (j *GmapJob) Process(ctx context.Context, resp *scrapemate.Response) (any, 
 func (j *GmapJob) BrowserActions(ctx context.Context, page playwright.Page) scrapemate.Response {
 	var resp scrapemate.Response
 
-	// Setup debug logging
-	var consoleLogs, pageErrors []string
-	var consentClicked bool
-	setupPageListeners(page, &consoleLogs, &pageErrors)
-
 	pageResponse, err := page.Goto(j.GetFullURL(), playwright.PageGotoOptions{
 		WaitUntil: playwright.WaitUntilStateDomcontentloaded,
 	})
-
 	if err != nil {
 		resp.Error = err
 
-		// Save debug info on error
-		html, _ := page.Content()
-		_ = saveDebugInfo(ctx, page, debugInfo{
-			timestamp:      time.Now().Format(time.RFC3339),
-			url:            j.GetFullURL(),
-			errorMsg:       fmt.Sprintf("page.Goto failed: %v", err),
-			html:           html,
-			consoleLogs:    consoleLogs,
-			pageErrors:     pageErrors,
-			consentClicked: false,
-		})
-
 		return resp
 	}
 
-	clickErr := clickRejectCookiesIfRequired(page)
-	if clickErr != nil {
-		resp.Error = clickErr
-
-		// Save debug info on consent error
-		html, _ := page.Content()
-		_ = saveDebugInfo(ctx, page, debugInfo{
-			timestamp:      time.Now().Format(time.RFC3339),
-			url:            j.GetFullURL(),
-			errorMsg:       fmt.Sprintf("clickRejectCookiesIfRequired failed: %v", clickErr),
-			html:           html,
-			consoleLogs:    consoleLogs,
-			pageErrors:     pageErrors,
-			consentClicked: false,
-		})
-
-		return resp
-	}
-
-	// Track if consent was clicked (no error means either clicked or not needed)
-	consentClicked = (clickErr == nil)
+	clickRejectCookiesIfRequired(page)
 
 	const defaultTimeout = 5000
 
-	// FIX: Don't fail if WaitForURL times out - Google Maps may redirect slowly
-	// especially when using a proxy. Just log the error and continue.
 	err = page.WaitForURL(page.URL(), playwright.PageWaitForURLOptions{
 		WaitUntil: playwright.WaitUntilStateDomcontentloaded,
 		Timeout:   playwright.Float(defaultTimeout),
 	})
+	if err != nil {
+		resp.Error = err
 
-	// Intentionally ignore WaitForURL errors - we'll wait for the feed element instead
-	_ = err
+		return resp
+	}
 
 	resp.URL = pageResponse.URL()
 	resp.StatusCode = pageResponse.Status()
@@ -230,10 +191,8 @@ func (j *GmapJob) BrowserActions(ctx context.Context, page playwright.Page) scra
 	sel := `div[role='feed']`
 
 	//nolint:staticcheck // TODO replace with the new playwright API
-	// FIX: Increased timeout from 700ms to 10000ms to allow Google Maps to load properly
-	// especially when using a proxy which adds latency
 	_, err = page.WaitForSelector(sel, playwright.PageWaitForSelectorOptions{
-		Timeout: playwright.Float(10000),
+		Timeout: playwright.Float(700),
 	})
 
 	var singlePlace bool
@@ -269,18 +228,6 @@ func (j *GmapJob) BrowserActions(ctx context.Context, page playwright.Page) scra
 	if err != nil {
 		resp.Error = err
 
-		// Save debug info on scroll error - THIS IS THE CRITICAL ERROR WE'RE DEBUGGING
-		html, _ := page.Content()
-		_ = saveDebugInfo(ctx, page, debugInfo{
-			timestamp:      time.Now().Format(time.RFC3339),
-			url:            j.GetFullURL(),
-			errorMsg:       fmt.Sprintf("scroll failed: %v", err),
-			html:           html,
-			consoleLogs:    consoleLogs,
-			pageErrors:     pageErrors,
-			consentClicked: consentClicked,
-		})
-
 		return resp
 	}
 
@@ -311,71 +258,23 @@ func waitUntilURLContains(ctx context.Context, page playwright.Page, s string) b
 	}
 }
 
-func clickRejectCookiesIfRequired(page playwright.Page) error {
-	const timeout = 5000
+func clickRejectCookiesIfRequired(page playwright.Page) {
+	sel := `form[action="https://consent.google.com/save"] input[type="submit"]`
 
-	// Try multiple selectors in order of preference
-	// IMPORTANT: Google uses <input type="submit"> NOT <button> tags!
-	selectors := []string{
-		// Primary: Form-based selector targeting the "reject" submit button by value
-		`input[type="submit"][value="Alle ablehnen"]`,
-		`input[type="submit"][value="Reject all"]`,
-		// Fallback 1: Form-based selector with aria-label
-		`input[type="submit"][aria-label*="ablehnen" i]`,
-		`input[type="submit"][aria-label*="reject" i]`,
-		// Fallback 2: Any submit button in the consent form (first one is usually "reject")
-		`form[action^="https://consent.google.com/save"] input[type="submit"]:first-of-type`,
+	locator := page.Locator(sel)
+
+	count, err := locator.Count()
+	if err != nil {
+		return
 	}
 
-	var clickedButton playwright.ElementHandle
-	var clickErr error
-
-	// Try each selector
-	for _, sel := range selectors {
-		//nolint:staticcheck // TODO replace with the new playwright API
-		el, err := page.WaitForSelector(sel, playwright.PageWaitForSelectorOptions{
-			Timeout: playwright.Float(timeout),
-		})
-
-		if err != nil {
-			// This selector didn't work, try next one
-			continue
-		}
-
-		if el == nil {
-			continue
-		}
-
-		// Found a button, try to click it
-		//nolint:staticcheck // TODO replace with the new playwright API
-		clickErr = el.Click()
-		if clickErr == nil {
-			clickedButton = el
-			break // Successfully clicked
-		}
+	if count == 0 {
+		return
 	}
 
-	// If we didn't find any consent button, that's OK (consent already accepted)
-	if clickedButton == nil && clickErr == nil {
-		return nil
-	}
-
-	// If we found a button but click failed, that's an error
-	if clickErr != nil {
-		return fmt.Errorf("failed to click consent reject button: %w", clickErr)
-	}
-
-	// Give Google a moment to process the consent dismissal
-	time.Sleep(1000 * time.Millisecond)
-
-	// CRITICAL FIX: Verify that consent was actually dismissed
-	// If we're still on consent.google.com, the consent dialog is blocking the page
-	currentURL := page.URL()
-	if strings.Contains(currentURL, "consent.google.com") {
-		return fmt.Errorf("consent dialog still present after click attempt (URL: %s)", currentURL)
-	}
-
-	return nil
+	_ = locator.First().Click(playwright.LocatorClickOptions{
+		Timeout: playwright.Float(2000),
+	})
 }
 
 func scroll(ctx context.Context,
@@ -383,33 +282,13 @@ func scroll(ctx context.Context,
 	maxDepth int,
 	scrollSelector string,
 ) (int, error) {
-	// FIX: Wait for the scroll element to exist before attempting to scroll
-	// This prevents the "Cannot read properties of null" error in headless mode
-	// Increased timeout to 30 seconds as Google Maps can take longer to load in headless mode
-	_, err := page.WaitForSelector(scrollSelector, playwright.PageWaitForSelectorOptions{
-		Timeout: playwright.Float(30000), // 30 seconds timeout
-		State:   playwright.WaitForSelectorStateAttached,
-	})
-	if err != nil {
-		return 0, fmt.Errorf("scroll element not found: %w", err)
-	}
-
 	expr := `async () => {
 		const el = document.querySelector("` + scrollSelector + `");
-		// FIX: Add null check before accessing scrollHeight
-		if (!el) {
-			return 0;
-		}
 		el.scrollTop = el.scrollHeight;
 
 		return new Promise((resolve, reject) => {
   			setTimeout(() => {
-				// FIX: Check el again after timeout
-				if (!el) {
-					resolve(0);
-				} else {
-    				resolve(el.scrollHeight);
-				}
+    		resolve(el.scrollHeight);
   			}, %d);
 		});
 	}`
@@ -466,90 +345,4 @@ func scroll(ctx context.Context,
 	}
 
 	return cnt, nil
-}
-
-// debugInfo holds debugging information captured during scraping
-type debugInfo struct {
-	timestamp      string
-	url            string
-	errorMsg       string
-	html           string
-	consoleLogs    []string
-	pageErrors     []string
-	consentClicked bool
-}
-
-// saveDebugInfo saves HTML content, screenshot, and logs to the debug directory
-func saveDebugInfo(ctx context.Context, page playwright.Page, info debugInfo) error {
-	debugDir := "/data/debug"
-
-	// Create debug directory if it doesn't exist
-	if err := os.MkdirAll(debugDir, 0755); err != nil {
-		return fmt.Errorf("failed to create debug directory: %w", err)
-	}
-
-	timestamp := time.Now().Format("20060102-150405")
-	baseFilename := filepath.Join(debugDir, timestamp)
-
-	// Save HTML content
-	if info.html != "" {
-		htmlFile := baseFilename + "_page.html"
-		if err := os.WriteFile(htmlFile, []byte(info.html), 0644); err != nil {
-			return fmt.Errorf("failed to save HTML: %w", err)
-		}
-	}
-
-	// Save screenshot
-	screenshotFile := baseFilename + "_screenshot.png"
-	if _, err := page.Screenshot(playwright.PageScreenshotOptions{
-		Path:     playwright.String(screenshotFile),
-		FullPage: playwright.Bool(true),
-	}); err != nil {
-		// Don't fail if screenshot fails, just log it
-		fmt.Fprintf(os.Stderr, "Warning: failed to save screenshot: %v\n", err)
-	}
-
-	// Save metadata and logs
-	metadataFile := baseFilename + "_metadata.txt"
-	metadata := fmt.Sprintf(`Timestamp: %s
-URL: %s
-Error: %s
-Consent Clicked: %v
-Page URL at error: %s
-
-=== Console Logs ===
-%s
-
-=== Page Errors ===
-%s
-`,
-		info.timestamp,
-		info.url,
-		info.errorMsg,
-		info.consentClicked,
-		page.URL(),
-		strings.Join(info.consoleLogs, "\n"),
-		strings.Join(info.pageErrors, "\n"),
-	)
-
-	if err := os.WriteFile(metadataFile, []byte(metadata), 0644); err != nil {
-		return fmt.Errorf("failed to save metadata: %w", err)
-	}
-
-	fmt.Fprintf(os.Stderr, "Debug info saved to: %s\n", debugDir)
-	return nil
-}
-
-// setupPageListeners sets up console and error listeners on the page
-func setupPageListeners(page playwright.Page, consoleLogs, pageErrors *[]string) {
-	// Capture console messages
-	page.On("console", func(msg playwright.ConsoleMessage) {
-		logEntry := fmt.Sprintf("[%s] %s", msg.Type(), msg.Text())
-		*consoleLogs = append(*consoleLogs, logEntry)
-	})
-
-	// Capture page errors
-	page.On("pageerror", func(err error) {
-		*pageErrors = append(*pageErrors, err.Error())
-	})
 }

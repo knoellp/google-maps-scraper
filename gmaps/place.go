@@ -109,66 +109,28 @@ func (j *PlaceJob) Process(_ context.Context, resp *scrapemate.Response) (any, [
 func (j *PlaceJob) BrowserActions(ctx context.Context, page playwright.Page) scrapemate.Response {
 	var resp scrapemate.Response
 
-	// Setup debug logging
-	var consoleLogs, pageErrors []string
-	var consentClicked bool
-	setupPageListeners(page, &consoleLogs, &pageErrors)
-
 	pageResponse, err := page.Goto(j.GetURL(), playwright.PageGotoOptions{
 		WaitUntil: playwright.WaitUntilStateDomcontentloaded,
 	})
 	if err != nil {
 		resp.Error = err
 
-		// Save debug info on error
-		html, _ := page.Content()
-		_ = saveDebugInfo(ctx, page, debugInfo{
-			timestamp:      time.Now().Format(time.RFC3339),
-			url:            j.GetURL(),
-			errorMsg:       fmt.Sprintf("page.Goto failed: %v", err),
-			html:           html,
-			consoleLogs:    consoleLogs,
-			pageErrors:     pageErrors,
-			consentClicked: false,
-		})
-
 		return resp
 	}
 
-	clickErr := clickRejectCookiesIfRequired(page)
-	if clickErr != nil {
-		resp.Error = clickErr
-
-		// Save debug info on consent error
-		html, _ := page.Content()
-		_ = saveDebugInfo(ctx, page, debugInfo{
-			timestamp:      time.Now().Format(time.RFC3339),
-			url:            j.GetURL(),
-			errorMsg:       fmt.Sprintf("clickRejectCookiesIfRequired failed: %v", clickErr),
-			html:           html,
-			consoleLogs:    consoleLogs,
-			pageErrors:     pageErrors,
-			consentClicked: false,
-		})
-
-		return resp
-	}
-
-	// Track if consent was clicked
-	consentClicked = (clickErr == nil)
+	clickRejectCookiesIfRequired(page)
 
 	const defaultTimeout = 5000
 
-	// FIX: Don't fail if WaitForURL times out - Google Maps may redirect slowly
-	// especially when using a proxy. Just log the error and continue.
-	// This matches the behavior in GmapJob.BrowserActions (job.go:177-183)
 	err = page.WaitForURL(page.URL(), playwright.PageWaitForURLOptions{
 		WaitUntil: playwright.WaitUntilStateDomcontentloaded,
 		Timeout:   playwright.Float(defaultTimeout),
 	})
+	if err != nil {
+		resp.Error = err
 
-	// Intentionally ignore WaitForURL errors - we'll wait for content to load instead
-	_ = err
+		return resp
+	}
 
 	resp.URL = pageResponse.URL()
 	resp.StatusCode = pageResponse.Status()
@@ -181,18 +143,6 @@ func (j *PlaceJob) BrowserActions(ctx context.Context, page playwright.Page) scr
 	raw, err := j.extractJSON(page)
 	if err != nil {
 		resp.Error = err
-
-		// Save debug info on extractJSON error
-		html, _ := page.Content()
-		_ = saveDebugInfo(ctx, page, debugInfo{
-			timestamp:      time.Now().Format(time.RFC3339),
-			url:            j.GetURL(),
-			errorMsg:       fmt.Sprintf("extractJSON failed: %v", err),
-			html:           html,
-			consoleLogs:    consoleLogs,
-			pageErrors:     pageErrors,
-			consentClicked: consentClicked,
-		})
 
 		return resp
 	}
@@ -270,30 +220,11 @@ function parse() {
 	if (!appState) {
 		return null;
 	}
-
-	// FIX: Robust key search - Google uses various dynamic key patterns
-	// Try all possible patterns and iterate through all keys as fallback
-
-	// Strategy 1: Try common patterns (Af-Zf, af-zf)
-	for (let i = 65; i <= 90; i++) {
-		const upperKey = String.fromCharCode(i) + "f";
-		if (appState[upperKey] && appState[upperKey][6]) {
-			return appState[upperKey][6];
-		}
-		const lowerKey = String.fromCharCode(i + 32) + "f";
-		if (appState[lowerKey] && appState[lowerKey][6]) {
-			return appState[lowerKey][6];
-		}
-	}
-
-	// Strategy 2: Iterate through all actual keys (most robust fallback)
 	const keys = Object.keys(appState);
-	for (const key of keys) {
-		if (appState[key] && appState[key][6]) {
-			return appState[key][6];
-		}
+	const key = keys[0];
+	if (appState[key] && appState[key][6]) {
+		return appState[key][6];
 	}
-
 	return null;
 }
 `
