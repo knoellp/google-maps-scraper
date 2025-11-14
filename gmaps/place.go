@@ -155,7 +155,7 @@ func (j *PlaceJob) BrowserActions(ctx context.Context, page playwright.Page) scr
 
 	if j.ExtractExtraReviews {
 		reviewCount := j.getReviewCount(raw)
-		if reviewCount > 8 { // we have more reviews
+		if reviewCount > 0 { // download reviews for ANY place with reviews (fixed threshold from >8)
 			params := fetchReviewsParams{
 				page:        page,
 				mapURL:      page.URL(),
