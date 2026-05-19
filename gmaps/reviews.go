@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -768,4 +769,19 @@ func FetchReviewsWithFallback(ctx context.Context, params fetchReviewsParams) (F
 	}
 
 	return rpcResponse, nil, nil
+}
+
+// SortReviewsByNewest sorts a slice of reviews in descending order by
+// PostedAtUnixMicros (newest first). This is an in-memory fallback for
+// cases where the listugcposts RPC does not guarantee sort order.
+//
+// TODO: investigate the exact pb-parameter encoding for sort=newest in the
+// listugcposts RPC. If confirmed, inject the sort flag into generateURL to
+// have the server return reviews pre-sorted and avoid full-page fetches for
+// since_days / incremental modes. Until then, callers should sort in memory
+// after fetching all pages.
+func SortReviewsByNewest(reviews []Review) {
+	sort.Slice(reviews, func(i, j int) bool {
+		return reviews[i].PostedAtUnixMicros > reviews[j].PostedAtUnixMicros
+	})
 }
