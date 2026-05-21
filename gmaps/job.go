@@ -236,6 +236,13 @@ func (j *GmapJob) BrowserActions(ctx context.Context, page scrapemate.BrowserPag
 		return resp
 	}
 
+	// Refresh resp.URL to whatever the page is at NOW — gmaps may have redirected
+	// silently from /maps/search/ to /maps/place/ even when the feed-selector
+	// timed out and the URL-contains-place wait also timed out (slow redirect
+	// after consent dismissal). Without this refresh, Process() sees the stale
+	// initial /maps/search/ URL and misses the direct-place handler.
+	resp.URL = page.URL()
+
 	scrollSelector := `div[role='feed']`
 
 	_, err = scroll(ctx, page, j.MaxDepth, scrollSelector)
