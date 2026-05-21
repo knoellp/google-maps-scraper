@@ -302,8 +302,12 @@ func scroll(ctx context.Context,
 	maxDepth int,
 	scrollSelector string,
 ) (int, error) {
+	// If the scroll panel selector doesn't match (e.g. gmaps showed a single-
+	// result direct-place page instead of a scrollable list), return null so
+	// the caller can treat this as "no more results" without a JS TypeError.
 	expr := `async () => {
 		const el = document.querySelector("` + scrollSelector + `");
+		if (!el) { return null; }
 		el.scrollTop = el.scrollHeight;
 
 		return new Promise((resolve, reject) => {
@@ -338,8 +342,12 @@ func scroll(ctx context.Context,
 		}
 
 		// Handle both int and float64 because browser-evaluated numbers may arrive as either type.
+		// nil means the scroll panel didn't render (e.g. gmaps showed a single-result direct-
+		// place page instead of a scrollable list). Treat as "nothing more to scroll".
 		var height int
 		switch v := scrollHeight.(type) {
+		case nil:
+			return cnt, nil
 		case int:
 			height = v
 		case float64:
